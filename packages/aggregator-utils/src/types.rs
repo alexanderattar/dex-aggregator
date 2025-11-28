@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Address([u8; 20]);
 
 impl Address {
@@ -39,6 +39,7 @@ pub enum Side {
     Ask,
 }
 
+#[derive(Debug, Clone)]
 pub struct Swap {
     pub input_token: Address,
     pub output_token: Address,

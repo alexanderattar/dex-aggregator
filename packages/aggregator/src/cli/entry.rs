@@ -7,6 +7,7 @@ use aggregator::{
     },
     takehome::{
         event_processor::TakehomeEventProcessor, request_processor::TakehomeRequestProcessor,
+        state::create_shared_state,
     },
 };
 use aggregator_utils::types::Address;
@@ -46,8 +47,9 @@ async fn run(args: RunCommandArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Don't change the above code!! ^^^^
     //
 
-    let takehome_request_processor = TakehomeRequestProcessor::new();
-    let takehome_event_processor = TakehomeEventProcessor::new();
+    let shared_orderbooks = create_shared_state();
+    let takehome_event_processor = TakehomeEventProcessor::new(shared_orderbooks.clone());
+    let takehome_request_processor = TakehomeRequestProcessor::new(shared_orderbooks);
 
     //
     // Dont change the below code!!

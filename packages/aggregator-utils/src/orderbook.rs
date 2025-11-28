@@ -43,4 +43,12 @@ impl OrderbookState {
     pub fn bids(&self) -> Vec<&OrderbookLevel> {
         self.bids.values().collect()
     }
+
+    pub fn insert_bid(&mut self, level: OrderbookLevel) {
+        self.bids.insert(Reverse(level.px), level);
+    }
+
+    pub fn insert_ask(&mut self, level: OrderbookLevel) {
+        self.asks.insert(level.px, level);
+    }
 }

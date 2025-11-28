@@ -1,35 +1,40 @@
 use aggregator_utils::orderbook::OrderbookState;
 use tracing::trace;
 
+use crate::takehome::state::SharedState;
 use crate::traits::EventProcessor;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    // Add any thiserror errors here
+    #[error("state lock failed")]
+    LockFailed,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TakehomeEventProcessor {
-    // Add any fields here
+    state: SharedState,
 }
 
 impl TakehomeEventProcessor {
-    /// This constructor is called in cli/entry.rs::run()
-    /// Any added configurations can be added there.
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(state: SharedState) -> Self {
+        Self { state }
     }
 }
 
 impl EventProcessor for TakehomeEventProcessor {
     type Error = Error;
 
-    fn process_orderbook(&self, new_orderbook: OrderbookState) -> Result<(), Self::Error> {
-        trace!(?new_orderbook, "Processing orderbook");
-        //
-        // TODO: Do something with the orderbook data!
-        //
+    // Ingest orderbook updates. Write lock held briefly for upsert only.
+    fn process_orderbook(&self, orderbook: OrderbookState) -> Result<(), Self::Error> {
+        trace!(
+            base = %orderbook.base_token,
+            quote = %orderbook.quote_token,
+            "orderbook update"
+        );
 
+        // Update shared state with new orderbook
+        let mut state = self.state.write().map_err(|_| Error::LockFailed)?;
+        state.upsert_orderbook(orderbook);
         Ok(())
     }
 }
