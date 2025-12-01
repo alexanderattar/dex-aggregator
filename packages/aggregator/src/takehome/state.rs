@@ -17,33 +17,31 @@ pub struct GraphEdge {
 // which matters since routing calls neighbors() at every hop.
 #[derive(Debug, Clone, Default)]
 pub struct TokenGraph {
-    adjacency: HashMap<Address, Vec<GraphEdge>>,
+    // Key is the token we're trading from, value is a list of edges we can trade to
+    edges: HashMap<Address, Vec<GraphEdge>>,
 }
 
 impl TokenGraph {
     // Check if the token is in the graph
     pub fn contains(&self, token: Address) -> bool {
-        self.adjacency.contains_key(&token)
+        self.edges.contains_key(&token)
     }
 
     // Get the neighbors of the token
     pub fn neighbors(&self, token: Address) -> &[GraphEdge] {
-        self.adjacency
-            .get(&token)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.edges.get(&token).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     // Each orderbook creates bidirectional edges between its token pair
     fn add_orderbook(&mut self, idx: usize, base: Address, quote: Address) {
         // quote -> base: buy base with quote (asks)
-        self.adjacency.entry(quote).or_default().push(GraphEdge {
+        self.edges.entry(quote).or_default().push(GraphEdge {
             target: base,
             orderbook_idx: idx,
             side: Side::Ask,
         });
         // base -> quote: sell base for quote (bids)
-        self.adjacency.entry(base).or_default().push(GraphEdge {
+        self.edges.entry(base).or_default().push(GraphEdge {
             target: quote,
             orderbook_idx: idx,
             side: Side::Bid,

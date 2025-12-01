@@ -14,10 +14,22 @@ use crate::takehome::{
 };
 use crate::traits::{EventProcessor, RequestProcessor};
 
-fn simple_book(base: Address, quote: Address, bid_px: u64, ask_px: u64, size: u64) -> OrderbookState {
+fn simple_book(
+    base: Address,
+    quote: Address,
+    bid_px: u64,
+    ask_px: u64,
+    size: u64,
+) -> OrderbookState {
     let mut ob = OrderbookState::new(base, quote);
-    ob.insert_bid(OrderbookLevel { px: bid_px, sz: size });
-    ob.insert_ask(OrderbookLevel { px: ask_px, sz: size });
+    ob.insert_bid(OrderbookLevel {
+        px: bid_px,
+        sz: size,
+    });
+    ob.insert_ask(OrderbookLevel {
+        px: ask_px,
+        sz: size,
+    });
     ob
 }
 
@@ -78,8 +90,14 @@ fn matching_handles_edge_cases() {
     let a = Address::new_random();
     let b = Address::new_random();
     let mut ob = OrderbookState::new(a, b);
-    ob.insert_ask(OrderbookLevel { px: 0, sz: u64::MAX });
-    ob.insert_bid(OrderbookLevel { px: u64::MAX, sz: u64::MAX });
+    ob.insert_ask(OrderbookLevel {
+        px: 0,
+        sz: u64::MAX,
+    });
+    ob.insert_bid(OrderbookLevel {
+        px: u64::MAX,
+        sz: u64::MAX,
+    });
 
     // Zero price ask should produce nothing
     let ask_result = match_order(&ob, Side::Ask, 10);
@@ -112,7 +130,9 @@ async fn request_processor_returns_route() {
 
     {
         let processor = TakehomeEventProcessor::new(shared.clone());
-        processor.process_orderbook(simple_book(a, b, 10, 12, 100)).unwrap();
+        processor
+            .process_orderbook(simple_book(a, b, 10, 12, 100))
+            .unwrap();
     }
 
     let processor = TakehomeRequestProcessor::new(shared);
@@ -124,7 +144,10 @@ async fn request_processor_returns_route() {
     };
 
     let resp = processor.process_request(req).await.unwrap();
-    assert!(matches!(resp, aggregator_utils::types::SwapResponse::Success(_)));
+    assert!(matches!(
+        resp,
+        aggregator_utils::types::SwapResponse::Success(_)
+    ));
 }
 
 #[test]
@@ -190,7 +213,9 @@ async fn rejects_slippage() {
 
     {
         let processor = TakehomeEventProcessor::new(shared.clone());
-        processor.process_orderbook(simple_book(a, b, 10, 12, 100)).unwrap();
+        processor
+            .process_orderbook(simple_book(a, b, 10, 12, 100))
+            .unwrap();
     }
 
     let processor = TakehomeRequestProcessor::new(shared);
@@ -234,7 +259,11 @@ fn picks_best_route_among_alternatives() {
     let output = route.last().unwrap().expected_output_amount;
 
     // Should pick the indirect route with much higher output
-    assert!(output > 200, "expected indirect route, got output {}", output);
+    assert!(
+        output > 200,
+        "expected indirect route, got output {}",
+        output
+    );
 }
 
 #[test]
