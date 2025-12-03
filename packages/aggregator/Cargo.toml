@@ -14,6 +14,7 @@ path = "src/cli/main.rs"
 [dependencies]
 aggregator-utils = { path = "../aggregator-utils" }
 arbitrary = "1.4.1"
+scc = "2"
 async-trait = "0.1.87"
 clap = { version = "4.5.31", features = ["derive"] }
 rand = "0.9.0"

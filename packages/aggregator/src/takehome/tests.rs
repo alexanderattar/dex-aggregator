@@ -39,11 +39,11 @@ fn edges_created_both_directions() {
     let quote = Address::new_random();
     let ob = simple_book(base, quote, 10, 12, 100);
 
-    let mut state = AggregatorState::new();
+    let state = AggregatorState::new();
     state.upsert_orderbook(ob);
 
-    let neighbors_base = state.graph.neighbors(base);
-    let neighbors_quote = state.graph.neighbors(quote);
+    let neighbors_base = state.neighbors(base);
+    let neighbors_quote = state.neighbors(quote);
 
     assert_eq!(neighbors_base.len(), 1);
     assert_eq!(neighbors_quote.len(), 1);
@@ -59,7 +59,7 @@ fn route_finds_direct_path() {
     let b = Address::new_random();
     let ob = simple_book(a, b, 20, 22, 100);
 
-    let mut state = AggregatorState::new();
+    let state = AggregatorState::new();
     state.upsert_orderbook(ob);
 
     let route = find_best_route(&state, a, b, 50).expect("route");
@@ -73,7 +73,7 @@ fn multi_hop_route() {
     let b = Address::new_random();
     let c = Address::new_random();
 
-    let mut state = AggregatorState::new();
+    let state = AggregatorState::new();
     state.upsert_orderbook(simple_book(a, c, 100, 102, 1000));
     state.upsert_orderbook(simple_book(c, b, 100, 102, 1000));
 
@@ -113,13 +113,13 @@ fn upsert_updates_existing_orderbook() {
     let a = Address::new_random();
     let b = Address::new_random();
 
-    let mut state = AggregatorState::new();
+    let state = AggregatorState::new();
     state.upsert_orderbook(simple_book(a, b, 10, 12, 100));
-    assert_eq!(state.orderbooks.len(), 1);
+    assert_eq!(state.orderbook_count(), 1);
 
     // Same pair should update, not insert
     state.upsert_orderbook(simple_book(a, b, 11, 13, 200));
-    assert_eq!(state.orderbooks.len(), 1);
+    assert_eq!(state.orderbook_count(), 1);
 }
 
 #[tokio::test]
@@ -156,7 +156,7 @@ fn no_path_returns_none() {
     let b = Address::new_random();
     let c = Address::new_random();
 
-    let mut state = AggregatorState::new();
+    let state = AggregatorState::new();
     // a-b connected, but c is isolated
     state.upsert_orderbook(simple_book(a, b, 10, 12, 100));
 
@@ -236,7 +236,7 @@ fn picks_best_route_among_alternatives() {
     let b = Address::new_random();
     let c = Address::new_random();
 
-    let mut state = AggregatorState::new();
+    let state = AggregatorState::new();
 
     // Direct route a->b with bad rate (price 20)
     let mut direct = OrderbookState::new(a, b);

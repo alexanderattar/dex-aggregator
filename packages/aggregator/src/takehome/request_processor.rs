@@ -8,8 +8,8 @@ use crate::traits::RequestProcessor;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("state lock failed")]
-    LockFailed,
+    #[error("routing failed: {0}")]
+    RoutingFailed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -44,12 +44,9 @@ impl RequestProcessor for TakehomeRequestProcessor {
             return Ok(SwapResponse::Failure("zero amount".to_string()));
         }
 
-        // Read lock the shared state
-        let state = self.state.read().map_err(|_| Error::LockFailed)?;
-
         // Check tokens exist before searching (better error messages)
-        let input_known = state.graph.contains(request.input_token);
-        let output_known = state.graph.contains(request.output_token);
+        let input_known = self.state.contains_token(request.input_token);
+        let output_known = self.state.contains_token(request.output_token);
 
         // Reject swaps with unknown tokens
         if !input_known || !output_known {
@@ -68,8 +65,9 @@ impl RequestProcessor for TakehomeRequestProcessor {
         }
 
         // Find best route by maximizing output
+        // Snapshot is taken inside find_best_route for consistent routing
         let route = match find_best_route(
-            &state,
+            &self.state,
             request.input_token,
             request.output_token,
             request.input_amount,
