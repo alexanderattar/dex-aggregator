@@ -47,12 +47,20 @@ async fn run(args: RunCommandArgs) -> Result<(), Box<dyn std::error::Error>> {
     let event_processor = DexEventProcessor::new(shared_orderbooks.clone());
     let request_processor = DexRequestProcessor::new(shared_orderbooks);
 
+    // Collect only tokens that are actually used in orderbook pairs
+    let used_tokens: Vec<Address> = token_pairs
+        .iter()
+        .flat_map(|(a, b)| [*a, *b])
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
     // RequestThread is a thread that simulates incoming swap requests to the aggregator
     let request_thread = RequestThread::new(
         RequestThreadConfig {
             requests_per_second: args.requests_per_second,
             slippage_tolerance_bps: args.slippage_tolerance_bps,
-            tokens,
+            tokens: used_tokens,
         },
         request_processor,
     );
