@@ -1,0 +1,25 @@
+[package]
+edition = "2021"
+name = "aggregator"
+version = "0.1.0"
+
+[lib]
+crate-type = ["lib"]
+name = "aggregator"
+
+[[bin]]
+name = "aggregator"
+path = "src/cli/main.rs"
+
+[dependencies]
+aggregator-utils = { path = "../aggregator-utils" }
+arbitrary = "1.4.1"
+scc = "2"
+async-trait = "0.1.87"
+clap = { version = "4.5.31", features = ["derive"] }
+rand = "0.9.0"
+thiserror = "2.0.12"
+tokio = { version = "1.43.0", features = ["full"] }
+tokio-graceful-shutdown = "0.16.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }

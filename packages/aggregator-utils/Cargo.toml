@@ -1,0 +1,13 @@
+[package]
+edition = "2021"
+name = "aggregator-utils"
+version = "0.1.0"
+
+[lib]
+crate-type = ["lib"]
+name = "aggregator_utils"
+
+[dependencies]
+arbitrary = "1.4.1"
+hex = "0.4.3"
+rand = "0.9.0"
