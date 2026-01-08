@@ -2,7 +2,7 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicU64, AtomicU8, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -20,19 +20,34 @@ pub struct GraphEdge {
     pub side: Side,               // Ask = buying target, Bid = selling for target
 }
 
+/// Metadata for an orderbook, tracking health and freshness.
 #[derive(Debug, Clone)]
 pub struct BookMeta {
+    /// Last time this orderbook was updated.
     pub updated_at: Instant,
+    /// Whether the orderbook passes validation (no crossed spreads, has liquidity).
     pub healthy: bool,
 }
 
+/// Atomic counters for aggregator metrics.
+///
+/// All counters use relaxed ordering since they are for monitoring only
+/// and do not require strict synchronization.
 #[derive(Debug, Default)]
 pub struct Metrics {
+    /// Total orderbook events received.
     pub events_total: AtomicU64,
+    /// Orderbook events rejected due to validation failure.
     pub events_invalid: AtomicU64,
+    /// Total swap requests received.
     pub requests_total: AtomicU64,
+    /// Swap requests that failed (no route, unknown tokens, etc.).
     pub requests_failed: AtomicU64,
+    /// Swap requests rejected by rate limiter.
+    pub requests_rate_limited: AtomicU64,
+    /// Number of routing snapshots created.
     pub snapshots_taken: AtomicU64,
+    /// Orderbooks skipped during routing due to staleness or health issues.
     pub stale_or_unhealthy_skipped: AtomicU64,
 }
 
@@ -47,7 +62,9 @@ const CB_HALF_OPEN: u8 = 2; // Testing if service recovered, allow limited reque
 pub struct CircuitBreaker {
     state: AtomicU8,
     consecutive_failures: AtomicU64,
-    last_state_change: std::sync::RwLock<Instant>,
+    /// Mutex instead of RwLock to prevent TOCTOU race conditions during state transitions.
+    /// State changes require atomic read-check-write which RwLock cannot guarantee.
+    last_state_change: Mutex<Instant>,
     /// Number of consecutive failures before opening circuit
     failure_threshold: u64,
     /// Time to wait before attempting recovery (half-open state)
@@ -59,7 +76,7 @@ impl Default for CircuitBreaker {
         Self {
             state: AtomicU8::new(CB_CLOSED),
             consecutive_failures: AtomicU64::new(0),
-            last_state_change: std::sync::RwLock::new(Instant::now()),
+            last_state_change: Mutex::new(Instant::now()),
             failure_threshold: 5,
             recovery_timeout: Duration::from_secs(10),
         }
@@ -71,7 +88,7 @@ impl CircuitBreaker {
         Self {
             state: AtomicU8::new(CB_CLOSED),
             consecutive_failures: AtomicU64::new(0),
-            last_state_change: std::sync::RwLock::new(Instant::now()),
+            last_state_change: Mutex::new(Instant::now()),
             failure_threshold,
             recovery_timeout,
         }
@@ -85,10 +102,9 @@ impl CircuitBreaker {
         match state {
             CB_CLOSED => true,
             CB_OPEN => {
-                // Check if enough time passed to try recovery
-                let last_change = self.last_state_change.read().unwrap();
+                // Hold mutex during entire check-and-transition to prevent TOCTOU race
+                let mut last_change = self.last_state_change.lock().unwrap();
                 if last_change.elapsed() >= self.recovery_timeout {
-                    drop(last_change);
                     // Transition to half-open to test recovery
                     if self
                         .state
@@ -100,7 +116,7 @@ impl CircuitBreaker {
                         )
                         .is_ok()
                     {
-                        *self.last_state_change.write().unwrap() = Instant::now();
+                        *last_change = Instant::now();
                         return true;
                     }
                 }
@@ -119,7 +135,7 @@ impl CircuitBreaker {
         if state == CB_HALF_OPEN {
             // Recovery confirmed, close circuit
             self.state.store(CB_CLOSED, Ordering::Release);
-            *self.last_state_change.write().unwrap() = Instant::now();
+            *self.last_state_change.lock().unwrap() = Instant::now();
         }
     }
 
@@ -137,14 +153,14 @@ impl CircuitBreaker {
                         .compare_exchange(CB_CLOSED, CB_OPEN, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
                     {
-                        *self.last_state_change.write().unwrap() = Instant::now();
+                        *self.last_state_change.lock().unwrap() = Instant::now();
                     }
                 }
             }
             CB_HALF_OPEN => {
                 // Recovery test failed, back to open
                 self.state.store(CB_OPEN, Ordering::Release);
-                *self.last_state_change.write().unwrap() = Instant::now();
+                *self.last_state_change.lock().unwrap() = Instant::now();
             }
             _ => {}
         }
@@ -175,6 +191,98 @@ impl fmt::Debug for CircuitBreaker {
     }
 }
 
+/// Token-bucket rate limiter for request throttling.
+/// Prevents abuse and provides backpressure under high load.
+pub struct RateLimiter {
+    /// Available tokens (scaled by 1000 for sub-token precision)
+    tokens: AtomicU64,
+    /// Last time tokens were refilled
+    last_refill: Mutex<Instant>,
+    /// Tokens added per second
+    tokens_per_second: u64,
+    /// Maximum token capacity (burst size)
+    max_tokens: u64,
+}
+
+impl RateLimiter {
+    /// Create a new rate limiter.
+    /// `tokens_per_second`: steady-state request rate
+    /// `max_tokens`: burst capacity
+    pub fn new(tokens_per_second: u64, max_tokens: u64) -> Self {
+        Self {
+            tokens: AtomicU64::new(max_tokens * 1000), // scaled
+            last_refill: Mutex::new(Instant::now()),
+            tokens_per_second,
+            max_tokens,
+        }
+    }
+
+    /// Attempt to acquire a token. Returns true if successful.
+    pub fn try_acquire(&self) -> bool {
+        self.refill();
+
+        // Try to consume one token (1000 scaled units)
+        let mut current = self.tokens.load(Ordering::Acquire);
+        loop {
+            if current < 1000 {
+                return false; // Not enough tokens
+            }
+
+            match self.tokens.compare_exchange_weak(
+                current,
+                current - 1000,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(new_val) => current = new_val,
+            }
+        }
+    }
+
+    /// Refill tokens based on elapsed time
+    fn refill(&self) {
+        let mut last = self.last_refill.lock().unwrap();
+        let elapsed = last.elapsed();
+
+        // Only refill if at least 1ms has passed (avoid excessive lock contention)
+        if elapsed.as_millis() < 1 {
+            return;
+        }
+
+        let tokens_to_add = (elapsed.as_millis() as u64 * self.tokens_per_second) / 1000 * 1000;
+        if tokens_to_add > 0 {
+            let max_scaled = self.max_tokens * 1000;
+            let current = self.tokens.load(Ordering::Acquire);
+            let new_tokens = (current + tokens_to_add).min(max_scaled);
+            self.tokens.store(new_tokens, Ordering::Release);
+            *last = Instant::now();
+        }
+    }
+
+    /// Get current available tokens (for monitoring)
+    pub fn available_tokens(&self) -> u64 {
+        self.tokens.load(Ordering::Acquire) / 1000
+    }
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        // Default: 1000 req/sec with burst of 100
+        Self::new(1000, 100)
+    }
+}
+
+impl fmt::Debug for RateLimiter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RateLimiter")
+            .field("available_tokens", &self.available_tokens())
+            .field("tokens_per_second", &self.tokens_per_second)
+            .field("max_tokens", &self.max_tokens)
+            .finish()
+    }
+}
+
 /// Shared state using scc::HashMap for lock-free concurrent access with per-book health.
 #[derive(Default)]
 pub struct AggregatorState {
@@ -194,6 +302,9 @@ pub struct AggregatorState {
 
     /// Circuit breaker for graceful degradation.
     pub circuit_breaker: CircuitBreaker,
+
+    /// Rate limiter for request throttling.
+    pub rate_limiter: RateLimiter,
 }
 
 impl AggregatorState {
@@ -323,6 +434,7 @@ impl fmt::Debug for AggregatorState {
             .field("orderbooks_count", &self.orderbooks.len())
             .field("graph_edges_count", &self.graph_edges.len())
             .field("circuit_breaker", &self.circuit_breaker)
+            .field("rate_limiter", &self.rate_limiter)
             .finish()
     }
 }

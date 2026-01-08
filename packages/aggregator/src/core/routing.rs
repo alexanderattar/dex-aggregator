@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -20,10 +21,12 @@ const STALE_TTL: Duration = Duration::from_secs(30);
 
 /// Snapshot of orderbook state for consistent routing.
 /// Taking a snapshot ensures BFS sees a consistent view even as orderbooks update.
+/// Uses Arc-wrapped HashMaps for O(1) cloning when shared across requests.
+#[derive(Clone)]
 struct RoutingSnapshot {
-    orderbooks: HashMap<(Address, Address), OrderbookState>,
-    graph_edges: HashMap<Address, Vec<GraphEdge>>,
-    meta: HashMap<(Address, Address), BookMeta>,
+    orderbooks: Arc<HashMap<(Address, Address), OrderbookState>>,
+    graph_edges: Arc<HashMap<Address, Vec<GraphEdge>>>,
+    meta: Arc<HashMap<(Address, Address), BookMeta>>,
 }
 
 impl RoutingSnapshot {
@@ -50,9 +53,9 @@ impl RoutingSnapshot {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Self {
-            orderbooks,
-            graph_edges,
-            meta,
+            orderbooks: Arc::new(orderbooks),
+            graph_edges: Arc::new(graph_edges),
+            meta: Arc::new(meta),
         }
     }
 
@@ -75,7 +78,47 @@ impl RoutingSnapshot {
     }
 }
 
-// Find route that maximizes output. Uses BFS to explore all paths up to MAX_HOPS.
+/// Arena node for path reconstruction without per-edge cloning.
+struct PathNode {
+    swap: Swap,
+    parent: Option<usize>, // Index into arena, None for first hop
+}
+
+/// Reconstruct path from arena by walking parent pointers.
+fn reconstruct_path(arena: &[PathNode], mut idx: usize) -> Vec<Swap> {
+    let mut path = Vec::with_capacity(MAX_HOPS);
+    loop {
+        path.push(arena[idx].swap.clone());
+        match arena[idx].parent {
+            Some(parent_idx) => idx = parent_idx,
+            None => break,
+        }
+    }
+    path.reverse();
+    path
+}
+
+/// Finds the optimal multi-hop trading route between two tokens.
+///
+/// Uses BFS to explore all paths up to `MAX_HOPS` (3) and returns the route
+/// that maximizes output amount. Takes a point-in-time snapshot of orderbook
+/// state for consistent routing.
+///
+/// # Arguments
+///
+/// * `state` - The aggregator state containing orderbooks and graph topology
+/// * `input_token` - The token being sold
+/// * `output_token` - The token being bought
+/// * `input_amount` - Amount of input token to swap
+///
+/// # Returns
+///
+/// `Some(Vec<Swap>)` containing the optimal route, or `None` if no path exists.
+///
+/// # Performance
+///
+/// Uses arena allocation for path tracking to avoid O(h*e) cloning overhead
+/// where h = hops and e = edges explored.
 pub fn find_best_route(
     state: &AggregatorState,
     input_token: Address,
@@ -87,28 +130,30 @@ pub fn find_best_route(
     let snapshot = RoutingSnapshot::from_state(state);
     debug!(time = %format_duration(start.elapsed()), "snapshot created");
 
-    // (current token, amount we have, path taken)
-    let mut queue = VecDeque::new();
-    queue.push_back((input_token, input_amount, Vec::new()));
+    // Arena for path nodes to avoid cloning paths on every edge
+    let mut arena: Vec<PathNode> = Vec::new();
 
-    // Track best output at destination separately since we can't compare
-    // amounts across different tokens mid-search
+    // (current token, amount we have, hop count, parent index in arena or None)
+    let mut queue: VecDeque<(Address, u64, usize, Option<usize>)> = VecDeque::new();
+    queue.push_back((input_token, input_amount, 0, None));
+
+    // Track best output at destination
     let mut best_output = 0u64;
-    let mut best_route: Option<Vec<Swap>> = None;
+    let mut best_path_end: Option<usize> = None;
 
-    while let Some((current_token, current_amount, hops)) = queue.pop_front() {
+    while let Some((current_token, current_amount, hop_count, parent_idx)) = queue.pop_front() {
         // Reached destination? Check if it's the best route so far
-        if current_token == output_token && !hops.is_empty() {
+        if current_token == output_token && parent_idx.is_some() {
             if current_amount > best_output {
                 best_output = current_amount;
-                best_route = Some(hops);
+                best_path_end = parent_idx;
             }
             continue; // don't explore past destination
         }
 
         // The request processor will return a no path error if the route is too long
         // This limits the search space
-        if hops.len() >= MAX_HOPS {
+        if hop_count >= MAX_HOPS {
             continue;
         }
 
@@ -135,19 +180,27 @@ pub fn find_best_route(
                 continue;
             }
 
-            // Create the next hop and add it to the queue
-            let mut next_hops = hops.clone();
-            next_hops.push(Swap {
-                input_token: current_token,
-                output_token: edge.target,
-                direction: edge.side,
-                input_amount: result.input_consumed,
-                expected_output_amount: result.output_produced,
+            // Add node to arena and enqueue
+            let node_idx = arena.len();
+            arena.push(PathNode {
+                swap: Swap {
+                    input_token: current_token,
+                    output_token: edge.target,
+                    direction: edge.side,
+                    input_amount: result.input_consumed,
+                    expected_output_amount: result.output_produced,
+                },
+                parent: parent_idx,
             });
 
-            queue.push_back((edge.target, result.output_produced, next_hops));
+            queue.push_back((
+                edge.target,
+                result.output_produced,
+                hop_count + 1,
+                Some(node_idx),
+            ));
         }
     }
 
-    best_route
+    best_path_end.map(|idx| reconstruct_path(&arena, idx))
 }

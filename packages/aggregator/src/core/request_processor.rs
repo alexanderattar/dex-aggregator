@@ -6,18 +6,40 @@ use crate::core::routing::find_best_route;
 use crate::core::state::SharedState;
 use crate::traits::RequestProcessor;
 
+/// Errors that can occur during request processing.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("routing failed: {0}")]
     RoutingFailed(String),
 }
 
+/// Processes swap requests by finding optimal multi-hop routes.
+///
+/// The request processor enforces rate limiting, circuit breaker protection,
+/// and slippage tolerance before executing swaps. It uses BFS-based routing
+/// to find the best path across multiple orderbooks.
+///
+/// # Features
+///
+/// - Rate limiting to prevent abuse
+/// - Circuit breaker for graceful degradation under failures
+/// - Slippage protection based on user-specified minimum output
+/// - Multi-hop routing (up to 3 hops) for optimal execution
+///
+/// # Example
+///
+/// ```ignore
+/// let state = create_shared_state();
+/// let processor = DexRequestProcessor::new(state);
+/// let response = processor.process_request(swap_request).await?;
+/// ```
 #[derive(Debug, Clone)]
 pub struct DexRequestProcessor {
     state: SharedState,
 }
 
 impl DexRequestProcessor {
+    /// Create a new request processor with the given shared state.
     pub fn new(state: SharedState) -> Self {
         Self { state }
     }
@@ -32,6 +54,16 @@ impl RequestProcessor for DexRequestProcessor {
             .metrics
             .requests_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Rate limit check: reject if too many requests
+        if !self.state.rate_limiter.try_acquire() {
+            warn!("swap rejected: rate limited");
+            self.state
+                .metrics
+                .requests_rate_limited
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(SwapResponse::Failure("rate limited".to_string()));
+        }
 
         // Circuit breaker check: reject early if system is degraded
         if !self.state.circuit_breaker.allow_request() {
@@ -62,29 +94,32 @@ impl RequestProcessor for DexRequestProcessor {
             return Ok(SwapResponse::Failure("zero amount".to_string()));
         }
 
-        // Check tokens exist before searching (better error messages)
+        // Check tokens exist before searching
         let input_known = self.state.contains_token(request.input_token);
         let output_known = self.state.contains_token(request.output_token);
 
         // Reject swaps with unknown tokens (infrastructure issue, affects circuit breaker)
+        // Return generic error to client but log details server-side
         if !input_known || !output_known {
-            let reason = match (input_known, output_known) {
-                (false, false) => "unknown tokens",
-                (false, true) => "unknown input token",
-                (true, false) => "unknown output token",
+            let detail = match (input_known, output_known) {
+                (false, false) => "both tokens unknown",
+                (false, true) => "input token unknown",
+                (true, false) => "output token unknown",
                 _ => unreachable!(),
             };
             warn!(
                 input_token = %request.input_token,
                 output_token = %request.output_token,
-                "swap rejected: {reason}"
+                detail,
+                "swap rejected: invalid request"
             );
             self.state
                 .metrics
                 .requests_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.state.circuit_breaker.record_failure();
-            return Ok(SwapResponse::Failure(reason.to_string()));
+            // Generic error to avoid leaking token existence info
+            return Ok(SwapResponse::Failure("invalid request".to_string()));
         }
 
         // Find best route (infrastructure issue if fails, affects circuit breaker)

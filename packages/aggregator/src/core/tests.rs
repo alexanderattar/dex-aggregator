@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use aggregator_utils::{
     orderbook::{OrderbookLevel, OrderbookState},
     types::{Address, Side, SwapRequest},
@@ -200,7 +198,8 @@ async fn rejects_unknown_token() {
     };
 
     let resp = processor.process_request(req).await.unwrap();
-    assert!(matches!(resp, SwapResponse::Failure(msg) if msg == "unknown tokens"));
+    // Error message sanitized to avoid leaking token existence info
+    assert!(matches!(resp, SwapResponse::Failure(msg) if msg == "invalid request"));
 }
 
 #[tokio::test]
