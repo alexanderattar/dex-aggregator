@@ -111,9 +111,11 @@ async fn stale_orderbooks_are_skipped() {
     event_processor.process_orderbook(book).unwrap();
 
     // Mark orderbook as stale
-    state.orderbook_health.update(&(token_a, token_b), |_, health| {
-        health.last_updated = std::time::Instant::now() - Duration::from_secs(60);
-    });
+    state
+        .orderbook_health
+        .update(&(token_a, token_b), |_, health| {
+            health.last_updated = std::time::Instant::now() - Duration::from_secs(60);
+        });
 
     let request = SwapRequest {
         input_token: token_a,
