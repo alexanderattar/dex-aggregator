@@ -45,13 +45,26 @@ RUST_LOG=aggregator=info cargo run --release -p aggregator -- run
 ### Running Tests
 
 ```bash
-cargo test
+cargo test --all
+```
+
+### Test Coverage
+
+```bash
+# Install coverage tool
+cargo install cargo-llvm-cov
+
+# Generate HTML report
+cargo llvm-cov --html
+
+# View report
+open target/llvm-cov/html/index.html
 ```
 
 ## Project Structure
 
 ```
-packages/
+crates/
 ├── aggregator/
 │   └── src/
 │       ├── core/           # Main implementation
