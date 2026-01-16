@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use aggregator_utils::{
     orderbook::{OrderbookLevel, OrderbookState},
     types::{Address, Side, SwapRequest},
@@ -379,85 +377,6 @@ fn event_processor_rejects_crossed_book() {
             .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
-}
-
-// ============================================================================
-// Circuit Breaker Tests
-// ============================================================================
-
-#[test]
-fn circuit_breaker_starts_closed() {
-    use crate::core::state::CircuitBreaker;
-
-    let cb = CircuitBreaker::default();
-    assert_eq!(cb.current_state(), "closed");
-    assert!(cb.allow_request());
-}
-
-#[test]
-fn circuit_breaker_opens_after_threshold() {
-    use crate::core::state::CircuitBreaker;
-    use std::time::Duration;
-
-    let cb = CircuitBreaker::new(3, Duration::from_secs(10));
-
-    // First 2 failures keep circuit closed
-    cb.record_failure();
-    cb.record_failure();
-    assert_eq!(cb.current_state(), "closed");
-    assert!(cb.allow_request());
-
-    // Third failure opens circuit
-    cb.record_failure();
-    assert_eq!(cb.current_state(), "open");
-    assert!(!cb.allow_request());
-}
-
-#[test]
-fn circuit_breaker_success_resets_failures() {
-    use crate::core::state::CircuitBreaker;
-    use std::time::Duration;
-
-    let cb = CircuitBreaker::new(3, Duration::from_secs(10));
-
-    cb.record_failure();
-    cb.record_failure();
-    assert_eq!(cb.failure_count(), 2);
-
-    // Success resets counter
-    cb.record_success();
-    assert_eq!(cb.failure_count(), 0);
-
-    // Need 3 more failures to open
-    cb.record_failure();
-    cb.record_failure();
-    assert_eq!(cb.current_state(), "closed");
-}
-
-#[tokio::test]
-async fn circuit_breaker_rejects_when_open() {
-    use aggregator_utils::types::SwapResponse;
-
-    let shared = create_shared_state();
-    let a = Address::new_random();
-    let b = Address::new_random();
-
-    // Force circuit breaker open by recording failures
-    for _ in 0..5 {
-        shared.circuit_breaker.record_failure();
-    }
-    assert_eq!(shared.circuit_breaker.current_state(), "open");
-
-    let processor = DexRequestProcessor::new(shared);
-    let req = SwapRequest {
-        input_token: a,
-        output_token: b,
-        input_amount: 100,
-        min_output_amount: 0,
-    };
-
-    let resp = processor.process_request(req).await.unwrap();
-    assert!(matches!(resp, SwapResponse::Failure(msg) if msg == "service degraded"));
 }
 
 // ============================================================================

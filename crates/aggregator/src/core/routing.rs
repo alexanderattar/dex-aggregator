@@ -9,27 +9,21 @@ use tracing::debug;
 
 use crate::core::format_duration;
 use crate::core::matching::match_order;
-use crate::core::state::{AggregatorState, BookMeta, GraphEdge};
+use crate::core::state::{AggregatorState, GraphEdge, OrderbookHealth};
 
-// Bounds search complexity. 3 hops covers most real DEX routes
-// (e.g. USDC -> ETH -> DOGE -> SHIB). This is a reasonable compromise between
-// search space and complexity.
 const MAX_HOPS: usize = 3;
-// Skip books older than this
 const STALE_TTL: Duration = Duration::from_secs(30);
 
 /// Snapshot of orderbook state for consistent routing.
-/// Taking a snapshot ensures BFS sees a consistent view even as orderbooks update.
 struct RoutingSnapshot {
     orderbooks: HashMap<(Address, Address), OrderbookState>,
     graph_edges: HashMap<Address, Vec<GraphEdge>>,
-    meta: HashMap<(Address, Address), BookMeta>,
+    health: HashMap<(Address, Address), OrderbookHealth>,
 }
 
 impl RoutingSnapshot {
     fn from_state(state: &AggregatorState) -> Self {
         let mut orderbooks = HashMap::new();
-        // scc uses scan with FnMut closure
         state.orderbooks.scan(|k, v| {
             orderbooks.insert(*k, v.clone());
         });
@@ -39,9 +33,9 @@ impl RoutingSnapshot {
             graph_edges.insert(*k, v.clone());
         });
 
-        let mut meta = HashMap::new();
-        state.orderbook_meta.scan(|k, v| {
-            meta.insert(*k, v.clone());
+        let mut health = HashMap::new();
+        state.orderbook_health.scan(|k, v| {
+            health.insert(*k, v.clone());
         });
 
         state
@@ -52,7 +46,7 @@ impl RoutingSnapshot {
         Self {
             orderbooks,
             graph_edges,
-            meta,
+            health,
         }
     }
 
@@ -68,53 +62,44 @@ impl RoutingSnapshot {
     }
 
     fn is_usable(&self, pair: &(Address, Address)) -> bool {
-        self.meta
+        self.health
             .get(pair)
-            .map(|m| m.healthy && m.updated_at.elapsed() <= STALE_TTL)
+            .map(|h| h.has_valid_spread && h.last_updated.elapsed() <= STALE_TTL)
             .unwrap_or(false)
     }
 }
 
-// Find route that maximizes output. Uses BFS to explore all paths up to MAX_HOPS.
+/// Find route that maximizes output using BFS.
 pub fn find_best_route(
     state: &AggregatorState,
     input_token: Address,
     output_token: Address,
     input_amount: Quantity,
 ) -> Option<Vec<Swap>> {
-    // Take snapshot for consistent routing
     let start = Instant::now();
     let snapshot = RoutingSnapshot::from_state(state);
     debug!(time = %format_duration(start.elapsed()), "snapshot created");
 
-    // (current token, amount we have, path taken)
     let mut queue = VecDeque::new();
     queue.push_back((input_token, input_amount, Vec::new()));
 
-    // Track best output at destination separately since we can't compare
-    // amounts across different tokens mid-search
     let mut best_output = 0u64;
     let mut best_route: Option<Vec<Swap>> = None;
 
     while let Some((current_token, current_amount, hops)) = queue.pop_front() {
-        // Reached destination? Check if it's the best route so far
         if current_token == output_token && !hops.is_empty() {
             if current_amount > best_output {
                 best_output = current_amount;
                 best_route = Some(hops);
             }
-            continue; // don't explore past destination
+            continue;
         }
 
-        // The request processor will return a no path error if the route is too long
-        // This limits the search space
         if hops.len() >= MAX_HOPS {
             continue;
         }
 
-        // Try all tokens reachable in one trade
         for edge in snapshot.neighbors(&current_token) {
-            // Skip stale or unhealthy books
             if !snapshot.is_usable(&edge.pair) {
                 state
                     .metrics
@@ -123,19 +108,16 @@ pub fn find_best_route(
                 continue;
             }
 
-            // Get the orderbook from snapshot using pair key
             let Some(book) = snapshot.get_orderbook(&edge.pair) else {
                 continue;
             };
 
             let result = match_order(book, edge.side, current_amount);
 
-            // Skip if no liquidity on this path
             if result.output_produced == 0 {
                 continue;
             }
 
-            // Create the next hop and add it to the queue
             let mut next_hops = hops.clone();
             next_hops.push(Swap {
                 input_token: current_token,

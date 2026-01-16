@@ -33,40 +33,19 @@ impl RequestProcessor for DexRequestProcessor {
             .requests_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Circuit breaker check: reject early if system is degraded
-        if !self.state.circuit_breaker.allow_request() {
-            warn!(
-                circuit_state = %self.state.circuit_breaker.current_state(),
-                "swap rejected: circuit breaker open"
-            );
-            self.state
-                .metrics
-                .requests_failed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Ok(SwapResponse::Failure("service degraded".to_string()));
-        }
-
-        // Reject swaps with the same token
         if request.input_token == request.output_token {
             warn!(token = %request.input_token, "swap rejected: same token");
             return Ok(SwapResponse::Failure("same token".to_string()));
         }
 
-        // Reject swaps with zero amount
         if request.input_amount == 0 {
-            warn!(
-                input_token = %request.input_token,
-                output_token = %request.output_token,
-                "swap rejected: zero amount"
-            );
+            warn!("swap rejected: zero amount");
             return Ok(SwapResponse::Failure("zero amount".to_string()));
         }
 
-        // Check tokens exist before searching (better error messages)
         let input_known = self.state.contains_token(request.input_token);
         let output_known = self.state.contains_token(request.output_token);
 
-        // Reject swaps with unknown tokens (infrastructure issue, affects circuit breaker)
         if !input_known || !output_known {
             let reason = match (input_known, output_known) {
                 (false, false) => "unknown tokens",
@@ -83,11 +62,9 @@ impl RequestProcessor for DexRequestProcessor {
                 .metrics
                 .requests_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.state.circuit_breaker.record_failure();
             return Ok(SwapResponse::Failure(reason.to_string()));
         }
 
-        // Find best route (infrastructure issue if fails, affects circuit breaker)
         let route = match find_best_route(
             &self.state,
             request.input_token,
@@ -99,27 +76,21 @@ impl RequestProcessor for DexRequestProcessor {
                 warn!(
                     input_token = %request.input_token,
                     output_token = %request.output_token,
-                    input_amount = request.input_amount,
-                    "swap rejected: no path"
+                    "swap rejected: no route found"
                 );
                 self.state
                     .metrics
                     .requests_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.state.circuit_breaker.record_failure();
-                return Ok(SwapResponse::Failure("no path".to_string()));
+                return Ok(SwapResponse::Failure("no route".to_string()));
             }
         };
 
         let output = route.last().map(|s| s.expected_output_amount).unwrap_or(0);
 
-        // Slippage protection: reject if output is below user's minimum
         if output < request.min_output_amount {
             warn!(
-                input_token = %request.input_token,
-                output_token = %request.output_token,
-                input_amount = request.input_amount,
-                output_amount = output,
+                output = output,
                 min_output = request.min_output_amount,
                 "swap rejected: slippage"
             );
@@ -141,9 +112,6 @@ impl RequestProcessor for DexRequestProcessor {
             hops = route.len(),
             "route found"
         );
-
-        // Successful route resets circuit breaker failure count
-        self.state.circuit_breaker.record_success();
 
         Ok(SwapResponse::Success(SwapResponseSuccess { route }))
     }
